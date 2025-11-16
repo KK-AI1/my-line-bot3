@@ -1,0 +1,283 @@
+import datetime
+import time
+from typing import List, Dict, Any, Optional
+
+
+async def check_and_handle_date_change(
+    client_id: str,
+    session_store: Dict[str, Any], 
+    session_store_lock,
+    chat_req,
+    a_client,
+    current_date: str
+    ) -> None:
+    """
+    日付変更をチェックして古いメモリの移動と要約処理を行う
+    
+    Args:
+        client_id: クライアントID
+        session_store: セッションストア
+        session_store_lock: セッションストアのロック
+        chat_req: チャットリクエスト関数
+        a_client: AIクライアント
+        current_date: 現在の日付（YYYY-MM-DD形式）
+    """
+    # 現在の日付と最後の活動日を比較して日付変更を検出
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # session_storeから最後の活動時間を取得
+    if client_id in session_store:
+        last_activity = session_store[client_id].get("last_activity", "")
+        if last_activity:
+            last_date = last_activity[:10]  # YYYY-MM-DD部分を取得
+                
+            # 日付変更時の処理：古いshortMemoriesをmidLogに移動し、midLogを要約してmidMemoriesに保存
+            if current_date != last_date:
+                print(f"デバッグ: 日付変更を検出 - 旧日付: {last_date}, 新日付: {current_date}")
+                # 前日のshortMemoriesをmidLogに追加（最大7個=1週間分を保持）
+                old_short_memories = session_store[client_id]["memory_store"].get("shortMemories", "")
+                if old_short_memories.strip():
+                    # 前日のshortMemoriesをmidLogに追加
+                    with session_store_lock:
+                        current_mid_memories = session_store[client_id]["memory_store"].get("midMemories", "")
+                        session_store[client_id]["long_conversation_logs"]["midLog"].append(current_mid_memories + "\n" + old_short_memories)
+                        
+                        # midLogが7を超えた場合の処理
+                        if len(session_store[client_id]["long_conversation_logs"]["midLog"]) > 7:  # 1週間分のログを保持
+                            # midMemoriesをlongLogに移動
+                            if current_mid_memories.strip():
+                                # longLogが存在しない場合は初期化
+                                if "longLog" not in session_store[client_id]["long_conversation_logs"]:
+                                    session_store[client_id]["long_conversation_logs"]["longLog"] = []
+                                
+                                session_store[client_id]["long_conversation_logs"]["longLog"].append(current_mid_memories)
+                            
+                            # midLogを7個に切り詰め
+                            session_store[client_id]["long_conversation_logs"]["midLog"] = session_store[client_id]["long_conversation_logs"]["midLog"][-7:]
+                    
+                    # longLogが存在し、内容がある場合は要約を作成してlongMemoriesに書き込み
+                    if ("longLog" in session_store[client_id]["long_conversation_logs"] and 
+                        len(session_store[client_id]["long_conversation_logs"]["longLog"]) > 0):
+                        
+                        longlog_entries = session_store[client_id]["long_conversation_logs"]["longLog"]
+                        # 全てのlongLogエントリを結合
+                        longlog_content = "\n".join(longlog_entries)
+                        
+                        if longlog_content.strip():
+                            user_msg = (
+                                "以下のテキストを600文字程度に要約した文章を作成すること。このテキストは数週間分のユーザーとアシスタントの会話の要約集です。"
+                                "作成する要約は時系列順に整理し、重要な出来事や継続的なテーマ、固有名詞などを重視してください。"
+                                "絵文字は無視してください。要約するテキスト=" + longlog_content
+                            )
+                            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            try:
+                                response_log = await chat_req(a_client, user_msg, "あなたは賢いAIです。userのリクエストに必ず日本語で答えること。リクエストの回答以外は答えないこと。")
+                                response_log = f"[{now}] {response_log}"
+                                print("longLogの要約をlongMemoriesに保存:", response_log)
+                                
+                                with session_store_lock:
+                                    # longMemoriesに要約を保存
+                                    session_store[client_id]["memory_store"]["longMemories"] = response_log
+                                    # longLogが52個（1年分）を超えた場合、古いログを削除
+                                    if len(session_store[client_id]["long_conversation_logs"]["longLog"]) > 52:
+                                        # 最新の52個を保持して古いものを削除
+                                        session_store[client_id]["long_conversation_logs"]["longLog"] = session_store[client_id]["long_conversation_logs"]["longLog"][-52:]
+                                        print(f"デバッグ: longLogが52個を超えたため、古いログを削除しました。現在の件数: {len(session_store[client_id]['long_conversation_logs']['longLog'])}")
+                            except Exception as e:
+                                print(f"longLog要約作成中にエラー: {e}")
+
+                    # midLogの最新エントリを要約してmidMemoriesに書き込み
+                    midlog_text = session_store[client_id]["long_conversation_logs"]["midLog"]
+                    if isinstance(midlog_text, list) and len(midlog_text) > 0:
+                        # midLogがリストの場合、最新のエントリを取得
+                        midlog_content = midlog_text[-1] if midlog_text else ""
+                    elif isinstance(midlog_text, str):
+                        # midLogが文字列の場合、そのまま使用
+                        midlog_content = midlog_text
+                    else:
+                        midlog_content = ""
+                    
+                    if midlog_content.strip():
+                        user_msg = (
+                            "以下のテキストを400文字程度に日記形式で要約した文章を作成すること。このテキストは一日のユーザーとアシスタントの会話ログです。"
+                            "作成する要約は会話の分析ではなく、会話ログにある出来事をまとめた要約です。特に固有名詞や、行動などは重視してください。"
+                            "絵文字は無視してください。要約するテキスト=" + midlog_content
+                        )
+                        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        try:
+                            response_log = await chat_req(a_client, user_msg, "あなたは賢いAIです。userのリクエストに必ず日本語で答えること。リクエストの回答以外は答えないこと。")
+                            response_log = f"[{now}] {response_log}"
+                            print("midLogの要約をmidMemoriesに保存:", response_log)
+                            
+                            with session_store_lock:
+                                # 既存のmidMemoriesに書き込む
+                                current_mid_memories = session_store[client_id]["memory_store"].get("midMemories", "")
+                                if current_mid_memories.strip():
+                                    session_store[client_id]["memory_store"]["midMemories"] = current_mid_memories + "\n" + response_log
+                                else:
+                                    session_store[client_id]["memory_store"]["midMemories"] = response_log
+                        except Exception as e:
+                            print(f"midLog要約作成中にエラー: {e}")
+
+async def process_conversation_memory(
+    client_id: str, 
+    session_store: Dict[str, Any], 
+    session_store_lock, 
+    chat_req, 
+    a_client,
+    current_date: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    会話ログが最大数を超えた場合の記憶処理を行う関数
+    
+    Args:
+        client_id: クライアントID
+        session_store: セッションストア
+        session_store_lock: セッションストアのロック
+        chat_req: チャットリクエスト関数
+        a_client: AIクライアント
+        current_date: 現在の日付（YYYY-MM-DD形式）。Noneの場合は自動取得
+    
+    Returns:
+        なし ->session_storeが更新されているため、返り値は不要
+    """
+    
+    # current_dateが指定されていない場合は現在の日付を自動取得
+    if current_date is None:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        current_date = timestamp[:10]  # YYYY-MM-DD部分を取得
+    
+    # 1. 日付変更チェック処理を最初に実行
+    await check_and_handle_date_change(
+        client_id=client_id,
+        session_store=session_store,
+        session_store_lock=session_store_lock,
+        chat_req=chat_req,
+        a_client=a_client,
+        current_date=current_date
+    )
+    # 2. very_long_logから新しいログを抽出してテキスト変換
+    print("====================================================================================================")
+    # session_storeのlong_conversation_logsから最新のログを取得（ロック使用）
+    with session_store_lock:
+        if client_id in session_store:
+            # very_long_logから新しいログを50件抜き出してテキスト変換
+            recent_logs_text = extract_recent_very_long_logs(client_id, session_store, max_logs=50)
+            print("====================================================================================================")
+            print("デバッグ: very_long_logから新しいログを50件抜き出してテキスト変換:", recent_logs_text)
+            print("====================================================================================================")
+
+    # 3. 要約生成処理（ロック外で実行 - AI処理は時間がかかるため）
+    # 抽出した会話ログを要約してshortMemoriesに保存
+    if recent_logs_text:
+        await _generate_and_save_summary(
+            recent_logs_text, client_id, session_store, session_store_lock, chat_req, a_client
+        )
+    return
+
+
+def _convert_logs_to_text(logs: List[Dict[str, Any]]) -> str:
+    """
+    ログをテキスト形式に変換する
+    
+    Args:
+        logs: 会話ログのリスト
+    
+    Returns:
+        テキスト形式に変換されたログ
+    """
+    removed_text = ""
+    for log in logs:
+        role_name = "ユーザー" if log["role"] == "user" else "アシスタント"
+        # ユーザーの場合は"ユーザーメッセージ="以降を抜き出す、アシスタントの場合はそのまま
+        if log["role"] == "user" and "ユーザーメッセージ=" in log['content']:
+            content = log['content'].split("ユーザーメッセージ=")[1]
+        else:
+            content = log['content']
+        timestamp = log.get('timestamp', '')
+        removed_text += f"{timestamp} {role_name}: {content}\n"
+    
+    return removed_text
+
+
+def extract_recent_very_long_logs(
+    client_id: str,
+    session_store: Dict[str, Any],
+    max_logs: int = 50
+) -> str:
+    """
+    session_store[client_id]["long_conversation_logs"]["very_long_log"]から
+    新しいログを最大max_logs件抜き出し、テキストに変換する
+
+    Args:
+        client_id: クライアントID
+        session_store: セッションストア
+        max_logs: 抜き出す最大ログ数（デフォルトは50）
+
+    Returns:
+        テキスト形式に変換されたログ
+    """
+    try:
+        # very_long_logが存在しない場合は空リストを初期化
+        if "very_long_log" not in session_store[client_id]["long_conversation_logs"]:
+            session_store[client_id]["long_conversation_logs"]["very_long_log"] = []
+
+        very_long_log = session_store[client_id]["long_conversation_logs"]["very_long_log"]
+        
+        # 文字列の場合は空のリストに置換
+        if isinstance(very_long_log, str):
+            session_store[client_id]["long_conversation_logs"]["very_long_log"] = []
+            very_long_log = []
+
+        # 新しいログを最大max_logs件抜き出し
+        recent_logs = very_long_log[-max_logs:] if len(very_long_log) > max_logs else very_long_log
+
+        # ログをテキスト形式に変換
+        converted_text = _convert_logs_to_text(recent_logs)
+        print(f"デバッグ: very_long_logから{len(recent_logs)}件のログを抽出してテキストに変換しました")
+        return converted_text
+        
+    except Exception as e:
+        print(f"very_long_logからのログ抽出中にエラー: {e}")
+        return ""
+
+async def _generate_and_save_summary(
+    memory_data_for_summary: str, 
+    client_id: str, 
+    session_store: Dict[str, Any], 
+    session_store_lock, 
+    chat_req, 
+    a_client
+) -> None:
+    """
+    要約を生成してセッションストアに保存する
+    
+    Args:
+        memory_data_for_summary: 要約対象データ
+        client_id: クライアントID
+        session_store: セッションストア
+        session_store_lock: セッションストアのロック
+        chat_req: チャットリクエスト関数
+        a_client: AIクライアント
+    """
+    try:
+        # メモリデータから改行文字を削除してテキストを整形
+        summarize_text = memory_data_for_summary.replace("\n", "").replace("\r", "")  # 改行を削除
+        if summarize_text.strip():  # 空でない場合のみ要約処理を実行
+            user_msg = (
+                "以下のテキストを400文字程度に日記形式で要約した文章を作成すること。このテキストは一日のユーザーとアシスタントの会話ログです。"
+                "作成する要約は会話の分析ではなく、会話ログにある出来事をまとめた要約です。特に固有名詞や、行動などは重視してください。"
+                "絵文字は無視してください。要約するテキスト=" + summarize_text
+            )
+            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            response_log = await chat_req(a_client, user_msg, "あなたは賢いAIです。userのリクエストに必ず日本語で答えること。リクエストの回答以外は答えないこと。")
+            response_log = f"[{now}] {response_log}"
+            print("YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY response_log=", response_log)
+            
+            # 要約結果をsession_storeに保存（再度ロック使用）
+            with session_store_lock:
+                if client_id in session_store:
+                   session_store[client_id]["memory_store"]["shortMemories"] = response_log
+
+    except Exception as e:
+        print(f"要約生成中にエラーが発生しました: {e}")  # エラーが発生してもログ保存は続行
