@@ -34,9 +34,9 @@ def chat_with_adoka(user_input: str, version: str, user_id: str) -> str:
 
     # バージョンに応じて使用するモデルを切り替え
     if version == "1.5":
-        model_name = "gemini-1.5-pro-latest" # 有料版Proモデル
+        model_name = "gemini-2.5-pro" # 有料版Proモデル
     else: # "2.0" or other (無料版Flashモデル)
-        model_name = "gemini-1.5-flash-latest"
+        model_name = "gemini-2.5-flash"
 
     # --- ▼▼▼ キャラクター設定（プロンプト）はここ！ ▼▼▼ ---
     prompt = f"""
